@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "connect_x"
+version = "0.1.0"
+description = ""
+authors = ["konumaru <konumaru1022@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+kaggle-environments = "^1.0.11"
+numpy = "^1.19.0"
+
+[tool.poetry.dev-dependencies]
+jupyterlab = "^2.1.5"
+pycodestyle = "^2.6.0"
+autopep8 = "^1.5.3"
+
+[build-system]
+requires = ["poetry>=0.12"]
+build-backend = "poetry.masonry.api"

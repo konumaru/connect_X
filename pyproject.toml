@@ -8,6 +8,10 @@ authors = ["konumaru <konumaru1022@gmail.com>"]
 python = "^3.8"
 kaggle-environments = "^1.0.11"
 numpy = "^1.19.0"
+gym = "^0.17.2"
+matplotlib = "^3.2.2"
+tqdm = "^4.47.0"
+ipywidgets = "^7.5.1"
 
 [tool.poetry.dev-dependencies]
 jupyterlab = "^2.1.5"

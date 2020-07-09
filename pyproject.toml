@@ -17,6 +17,7 @@ torch = "^1.5.1"
 torchvision = "^0.6.1"
 JSAnimation = "^0.1"
 ipympl = "^0.5.6"
+Box2D = "^2.3.10"
 
 [tool.poetry.dev-dependencies]
 jupyterlab = "^2.1.5"

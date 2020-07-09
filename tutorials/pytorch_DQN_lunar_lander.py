@@ -1,18 +1,4 @@
-# import gym
-
-# env = gym.make('CartPole-v0')
-# env.reset()
-
-
-# print(env.action_space)
-# print(env.observation_space)
-
-# for _ in range(1000):
-#     env.render()
-#     env.step(env.action_space.sample())
-# env.close()
-
-
+# Reference: https://www.youtube.com/watch?v=SMZfgeHFFcA
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -156,7 +142,7 @@ if __name__ == '__main__':
                   eps_end=0.01, input_dims=[8], lr=0.003)
     scores, eps_history = [], []
     n_games = 500
-    render = False
+    render = True
 
     for i in range(n_games):
         score = 0
@@ -174,6 +160,9 @@ if __name__ == '__main__':
             if render:
                 if i % 10 == 0 and i > 0:
                     env.render()
+                    # MEMO: Get img array
+                    # img = env.render(mode='rgb_array')
+                    # print(img)
 
         scores.append(score)
         eps_history.append(agent.epsilon)

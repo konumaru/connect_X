@@ -29,7 +29,6 @@ class DeepQNetwork(nn.Module):
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
         action = self.fc3(x)
-
         return action
 
 
@@ -95,7 +94,6 @@ class Agent():
         q_eval = self.Q_eval.forward(state_batch)[batch_index, action_batch]
         q_next = self.Q_eval.forward(new_state_batch)
         q_next[terminal_batch] = 0.0
-
         q_target = reward_batch + self.gamma * T.max(q_next, dim=1)[0]
 
         loss = self.Q_eval.loss(q_target, q_eval).to(self.Q_eval.device)
@@ -174,3 +172,4 @@ if __name__ == '__main__':
     x = [i + 1 for i in range(n_games)]
     filename = 'lunar_lander.png'
     plot_learning_curve(x, scores, eps_history, filename)
+    env.close()

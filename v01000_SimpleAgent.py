@@ -7,7 +7,7 @@ from kaggle_environments import make, utils
 from kaggle_environments import evaluate
 
 IS_TEST = False
-SUB_FILENAME = "Agents/v01000_simple_agent.py"
+SUB_FILENAME = "Agent/v01000_simple_agent.py"
 
 
 def my_agent(state, configuration):

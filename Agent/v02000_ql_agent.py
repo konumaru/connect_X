@@ -2,7 +2,7 @@
 def my_agent(observation, configuration):
     from random import choice
     # 作成したテーブルを文字列に変換して、Pythonファイル上でdictとして扱えるようにする
-    q_table = {'1':0}
+    q_table = {'1':5}
     board = observation.board[:]
     board.append(observation.mark)
     state_key = list(map(str, board))

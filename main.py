@@ -21,11 +21,9 @@ import torch.nn.functional as F
 
 import kaggle_environments as kaggle_env
 
-# TODO:
-# - [ ] グローバルで、出力ファイルの名前などを決め、わかりやすく、編集しやすいようにする。
-# - [ ] 下記のようなモデルの変更を行った際の、変化を観測しやすいような仕組みを考える。
-# - [ ] DeepQNetworkTrainer の custom_reward の報酬をもっと多様にすることでスコアが改善するのか試す
-# - [ ] 評価にrandom を用いているが、 negamax というのも使えるらしい
+
+MODEL_FILEPATH = 'cache/dq.pkl'
+SUBMISSION_FILENAME = 'Agent/dqn_submission.py'
 
 
 def load_pickle(filename):
@@ -41,6 +39,18 @@ def dump_pickle(data, filename):
 
 '''Preprocessing.
 '''
+
+
+def preprocess(obs, col_num, row_num):
+    # 状態は自分のチェッカーを１、相手のチェッカーを0.5とした7*6次元の配列で表現する
+    state = np.array(obs.board)
+    state = state.reshape([col_num, row_num])
+
+    if obs.mark == 1:
+        return np.where(state == 2, 0.5, state)
+    else:
+        result = np.where(state == 2, 1, state)
+        return np.where(state == 1, 0.5, state)
 
 
 '''Train Agent.
@@ -215,13 +225,13 @@ def train_agent():
     trainer = env.train([None, "negamax"])
     print(json.dumps(env.configuration, indent=2))
 
-    if os.path.exists('cache/dq.pkl'):
-        dq = load_pickle('cache/dq.pkl')
+    if os.path.exists(MODEL_FILEPATH):
+        dq = load_pickle(MODEL_FILEPATH)
     else:
         dq = DeepQNetworkTrainer(env)
         dq.train(trainer, episode_cnt=30000)
         # save cache.
-        dump_pickle(dq, 'cache/dq.pkl')
+        dump_pickle(dq, MODEL_FILEPATH)
 
     # dump reward log.
     reward_log = pd.DataFrame({'Average Reward': dq.reward_log})
@@ -237,7 +247,7 @@ def train_agent():
 - 必要なライブラリ、クラス、関数をsubmissionファイルに書き出す
 '''
 
-agent_file = '''
+libs_source = '''\
 import io
 import base64
 import pickle
@@ -248,27 +258,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+'''
 
+write_functions = [CNN, preprocess]
 
-class CNN(nn.Module):
-    def __init__(self, output):
-        super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 16, 3)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.conv2 = nn.Conv2d(16, 32, 3)
-        self.bn2 = nn.BatchNorm2d(32)
-        self.fc = nn.Linear(192, 32)
-        self.head = nn.Linear(32, output)
-
-    def forward(self, x):
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = x.view(x.size()[0], -1)
-        x = self.fc(x)
-        x = self.head(x)
-        return x
-
-
+agent_source = '''\
 def load_model():
     model = CNN(7)
     encoded_weights = "{model_state_dict_bin}".encode()
@@ -277,19 +271,8 @@ def load_model():
     return model
 
 
-def preprocess(obs, col_num, row_num):
-    # 状態は自分のチェッカーを１、相手のチェッカーを0.5とした7*6次元の配列で表現する
-    state = np.array(obs.board)
-    state = state.reshape([col_num, row_num])
-
-    if obs.mark == 1:
-        return np.where(state == 2, 0.5, state)
-    else:
-        result = np.where(state == 2, 1, state)
-        return np.where(state == 1, 0.5, state)
-
-
 model = load_model()
+
 
 def agent(observation, config):
     col_num = config.columns
@@ -297,7 +280,9 @@ def agent(observation, config):
     channel = 1
 
     state = preprocess(observation, col_num, row_num)
-    prediction = model(torch.from_numpy(state).view(-1, channel, col_num, row_num).float()).detach().numpy()
+    prediction = model(
+        torch.from_numpy(state).view(-1, channel, col_num, row_num).float()
+    ).detach().numpy()
     action = int(np.argmax(prediction))
 
     # 選んだActionが、ゲーム上選べない場合
@@ -308,22 +293,29 @@ def agent(observation, config):
 '''
 
 
-def create_submission_file():
-    class_str = inspect.getsource(CNN)
-    print(class_str)
+def write_agent_to_file(function, file):
+    with open(file, "a" if os.path.exists(file) else "w") as f:
+        f.write(inspect.getsource(function) + '\n\n')
 
-    dq = load_pickle('cache/dq.pkl')
+
+def create_submission_file():
+    dq = load_pickle(MODEL_FILEPATH)
     state_dict = dq.agent.model.state_dict()
     model_state_dict_bin = base64.b64encode(pickle.dumps(state_dict)).decode("utf-8")
 
-    submission_str = agent_file.format(model_state_dict_bin=model_state_dict_bin)
+    with open(SUBMISSION_FILENAME, "w") as f:
+        f.write(libs_source + '\n\n')
 
-    with open('Agent/dqn_submission.py', mode='w') as f:
-        f.write(submission_str)
+    for wf in write_functions:
+        write_agent_to_file(wf, SUBMISSION_FILENAME)
+
+    formated_agent_source = agent_source.format(model_state_dict_bin=model_state_dict_bin)
+    with open(SUBMISSION_FILENAME, "a") as f:
+        f.write(formated_agent_source)
 
     # check can submission.
     env = kaggle_env.make("connectx", debug=True)
-    env.run(['Agent/dqn_submission.py', 'Agent/dqn_submission.py'])
+    env.run([SUBMISSION_FILENAME, SUBMISSION_FILENAME])
     print("Success" if env.state[0].status == env.state[1].status == "DONE" else "Failed")
 
 
@@ -333,7 +325,7 @@ def create_submission_file():
 
 def evaluation():
     result = np.array(
-        kaggle_env.evaluate("connectx", ['Agent/dqn_submission.py', "random"], num_episodes=300)
+        kaggle_env.evaluate("connectx", [SUBMISSION_FILENAME, "random"], num_episodes=300)
     )
     win_rate = np.mean(result[:, 0] == 1)
     print(f'Average Win Ratio: {win_rate}')
@@ -348,13 +340,6 @@ def evaluation():
     plt.title('Beta Distribution of Win Rate.')
     plt.plot(x, dist.pdf(x))
     plt.savefig('log/beta_distribution_of_win_rate.png')
-
-    # Print Sample Match
-    # env = kaggle_env.make("connectx", debug=False)
-    # for _ in range(5):
-    #     env.reset()
-    #     env.run(['Agent/dqn_submission.py', "random"])
-    #     print(env.render(mode="ansi", width=500, height=450))
 
 
 def main():

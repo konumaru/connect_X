@@ -21,6 +21,12 @@ import torch.nn.functional as F
 
 import kaggle_environments as kaggle_env
 
+# TODO:
+# - [ ] グローバルで、出力ファイルの名前などを決め、わかりやすく、編集しやすいようにする。
+# - [ ] 下記のようなモデルの変更を行った際の、変化を観測しやすいような仕組みを考える。
+# - [ ] DeepQNetworkTrainer の custom_reward の報酬をもっと多様にすることでスコアが改善するのか試す
+# - [ ] 評価にrandom を用いているが、 negamax というのも使えるらしい
+
 
 def load_pickle(filename):
     with open(filename, 'rb') as f:
@@ -31,6 +37,10 @@ def load_pickle(filename):
 def dump_pickle(data, filename):
     with open(filename, 'wb') as f:
         pickle.dump(data, f)
+
+
+'''Preprocessing.
+'''
 
 
 '''Train Agent.
@@ -172,10 +182,10 @@ class DeepQNetworkTrainer():
             else:  # 引き分け
                 return 0
         else:
-            return 0  # 勝負がついてない
+            return -0.05  # 勝負がついてない
 
     def train(self, trainer, epsilon_decay_rate=0.9999,
-              min_epsilon=0.1, episode_cnt=100, gamma=0.6):
+              min_epsilon=0.01, episode_cnt=100, gamma=0.6):
         cnt = 0
         for episode in tqdm(range(episode_cnt)):
             rewards = []
@@ -202,7 +212,7 @@ class DeepQNetworkTrainer():
 
 def train_agent():
     env = kaggle_env.make("connectx", debug=False)
-    trainer = env.train([None, "random"])
+    trainer = env.train([None, "negamax"])
     print(json.dumps(env.configuration, indent=2))
 
     if os.path.exists('cache/dq.pkl'):
@@ -299,7 +309,10 @@ def agent(observation, config):
 
 
 def create_submission_file():
-    dq = load_pickle('model.pkl')
+    class_str = inspect.getsource(CNN)
+    print(class_str)
+
+    dq = load_pickle('cache/dq.pkl')
     state_dict = dq.agent.model.state_dict()
     model_state_dict_bin = base64.b64encode(pickle.dumps(state_dict)).decode("utf-8")
 
@@ -335,6 +348,13 @@ def evaluation():
     plt.title('Beta Distribution of Win Rate.')
     plt.plot(x, dist.pdf(x))
     plt.savefig('log/beta_distribution_of_win_rate.png')
+
+    # Print Sample Match
+    # env = kaggle_env.make("connectx", debug=False)
+    # for _ in range(5):
+    #     env.reset()
+    #     env.run(['Agent/dqn_submission.py', "random"])
+    #     print(env.render(mode="ansi", width=500, height=450))
 
 
 def main():

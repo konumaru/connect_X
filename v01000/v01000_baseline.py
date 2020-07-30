@@ -1,3 +1,4 @@
+# ref: https://yukoishizaki.hatenablog.com/entry/2020/04/05/202935
 import os
 import sys
 import json
@@ -22,8 +23,10 @@ import torch.nn.functional as F
 import kaggle_environments as kaggle_env
 
 
-MODEL_FILEPATH = 'cache/dq.pkl'
-SUBMISSION_FILENAME = 'Agent/dqn_submission.py'
+VERSION_NAME = str(__file__)
+VERSION = str(__file__).split('_')[0]
+MODEL_FILEPATH = f'cache/{VERSION}_dq_trainer.pkl'
+SUBMISSION_FILENAME = f'../submission/{VERSION_NAME}.py'
 
 
 def load_pickle(filename):
@@ -182,7 +185,7 @@ class DeepQNetworkTrainer():
         self.agent = DeepQNetworkAgent(env)
         self.reward_log = []
 
-    def custom_reward(self, reward, done):
+    def custom_reward(self, state, reward, done):
         # Clipping
         if done:
             if reward == 1:  # 勝ち
@@ -207,7 +210,7 @@ class DeepQNetworkTrainer():
                 action = self.agent.policy(state, self.epsilon)
                 prev_state = state
                 state, reward, done, _ = trainer.step(action)
-                reward = self.custom_reward(reward, done)
+                reward = self.custom_reward(state, reward, done)
                 # 行動履歴の蓄積
                 exp = {'s': prev_state, 'a': action, 'r': reward, 'n_s': state, 'done': done}
                 self.agent.add_experience(exp)
@@ -226,21 +229,21 @@ def train_agent():
     print(json.dumps(env.configuration, indent=2))
 
     if os.path.exists(MODEL_FILEPATH):
-        dq = load_pickle(MODEL_FILEPATH)
+        dq_trainer = load_pickle(MODEL_FILEPATH)
     else:
-        dq = DeepQNetworkTrainer(env)
-        dq.train(trainer, episode_cnt=30000)
+        dq_trainer = DeepQNetworkTrainer(env)
+        dq_trainer.train(trainer, episode_cnt=30000)
         # save cache.
-        dump_pickle(dq, MODEL_FILEPATH)
+        dump_pickle(dq_trainer, MODEL_FILEPATH)
 
     # dump reward log.
-    reward_log = pd.DataFrame({'Average Reward': dq.reward_log})
+    reward_log = pd.DataFrame({'Average Reward': dq_trainer.reward_log})
     plt.figure()
     reward_log.rolling(300).mean().plot(
         figsize=(10, 5),
         title='Average Reward by rolling t300.'
     )
-    plt.savefig('log/reward_log.png')
+    plt.savefig(f'train_log/{VERSION}_reward_lr_history.png')
 
 
 '''Create Submission File.
@@ -339,7 +342,7 @@ def evaluation():
     plt.figure()
     plt.title('Beta Distribution of Win Rate.')
     plt.plot(x, dist.pdf(x))
-    plt.savefig('log/beta_distribution_of_win_rate.png')
+    plt.savefig(f'evaluation/{VERSION}_beta_distribution_of_win_rate.png')
 
 
 def main():

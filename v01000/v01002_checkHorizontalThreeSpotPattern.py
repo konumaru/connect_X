@@ -1,4 +1,3 @@
-# ref: https://www.kaggle.com/alexisbcook/one-step-lookahead
 import os
 import sys
 import json
@@ -12,8 +11,9 @@ import scipy
 import numpy as np
 import pandas as pd
 
-import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.pyplot as plt
+plt.style.use('seaborn-dark')
 
 import torch
 import torch.nn as nn
@@ -22,38 +22,36 @@ import torch.nn.functional as F
 
 import kaggle_environments as kaggle_env
 
+IS_TEST = False
 
 FILE_NAME = str(__file__)
 VERSION = str(__file__).split('_')[0]
 MODEL_FILEPATH = f'cache/{VERSION}_dq_trainer.pkl'
 SUBMISSION_FILENAME = f'../submission/{FILE_NAME}'
 
-
-def load_pickle(filename):
-    with open(filename, 'rb') as f:
-        data = pickle.load(f)
-    return data
-
-
-def dump_pickle(data, filename):
-    with open(filename, 'wb') as f:
-        pickle.dump(data, f)
+print('cuda available: ', torch.cuda.is_available())
 
 
 '''Preprocessing.
 '''
 
 
-def preprocess(obs, col_num, row_num):
-    # 状態は自分のチェッカーを１、相手のチェッカーを0.5とした7*6次元の配列で表現する
-    state = np.array(obs.board)
-    state = state.reshape([col_num, row_num])
+def preprocess(state: dict) -> np.array:
+    row = 6
+    column = 7
 
-    if obs.mark == 1:
-        return np.where(state == 2, 0.5, state)
-    else:
-        result = np.where(state == 2, 1, state)
-        return np.where(state == 1, 0.5, state)
+    own_mark = state['mark']
+    baord = state['board']
+
+    assert len(baord) == 42, "Board length is 7 * 6 or 42."
+
+    board = np.array(baord).reshape([column, row])
+    # Convert Own place to 1.0 and Enemy place to 0.5.
+    if own_mark == 1:
+        return np.where(board == 2, 0.5, board)
+    elif own_mark == 2:
+        board = np.where(board == 1, 0.5, board)
+        return np.where(board == 2, 1, board)
 
 
 '''Train Agent.
@@ -61,242 +59,335 @@ def preprocess(obs, col_num, row_num):
 
 
 class CNN(nn.Module):
-    def __init__(self, output):
+    def __init__(self, num_channel: int, num_action: int):
         super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 16, 3)
+        self.conv1 = nn.Conv2d(num_channel, 16, 3)
         self.bn1 = nn.BatchNorm2d(16)
         self.conv2 = nn.Conv2d(16, 32, 3)
         self.bn2 = nn.BatchNorm2d(32)
-        self.fc = nn.Linear(192, 32)
-        self.head = nn.Linear(32, output)
+        self.fc1 = nn.Linear(192, 32)
+        self.fc2 = nn.Linear(32, num_action)
 
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         self.to(self.device)
 
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = x.view(x.size()[0], -1)
-        x = self.fc(x)
-        x = self.head(x)
+        x = self.fc1(x)
+        x = self.fc2(x)
         return x
 
 
-class DeepQNetworkAgent():
-    def __init__(self, env, lr=0.01, min_experiences=100, max_experiences=10_000, channel=1):
+class DDQNAgent():
+    def __init__(self, env, num_action, lr=1e-3,
+                 batch_size=100, max_mem_size=10_000, num_channel=1):
         self.env = env
-        self.model = CNN(output=7)
-        self.teacher_model = CNN(output=7)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.criterrion = nn.MSELoss()
-        self.experience = {'s': [], 'a': [], 'r': [], 'n_s': [], 'done': []}
-        self.min_experiences = min_experiences
-        self.max_experiences = max_experiences
-        self.actions = list(range(self.env.configuration.columns))
-        self.col_num = self.env.configuration.columns
-        self.row_num = self.env.configuration.rows
-        self.channel = channel
+        self.num_action = num_action
+        self.batch_size = batch_size
+        self.num_channel = num_channel
 
-    def add_experience(self, exp):
-        # 行動履歴の更新
-        if len(self.experience['s']) >= self.max_experiences:
-            # 行動履歴のサイズが大きすぎる時は古いものを削除
-            for key in self.experience.keys():
-                self.experience[key].pop(0)
+        self.num_row = self.env.configuration.rows
+        self.num_column = self.env.configuration.columns
 
-        for key, value in exp.items():
-            self.experience[key].append(value)
+        self.model = CNN(num_channel, num_action)
+        self.target_model = CNN(num_channel, num_action)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        self.criterion = torch.nn.MSELoss()
 
-    def preprocess(self, state):
-        # 状態は自分のチェッカーを１、相手のチェッカーを0.5とした7*6次元の配列で表現する
-        result = np.array(state.board[:])
-        result = result.reshape([self.col_num, self.row_num])
+        self.mem_cntr = 0
+        self.mem_size = max_mem_size
+        self.memory = {
+            's': np.zeros((self.mem_size, *(self.num_column, self.num_row)), dtype=np.float32),
+            'a': np.zeros(self.mem_size, dtype=np.float32),
+            'r': np.zeros(self.mem_size, dtype=np.float32),
+            'n_s': np.zeros((self.mem_size, *(self.num_column, self.num_row)), dtype=np.float32),
+            'done': np.zeros(self.mem_size, dtype=np.float32)
+        }
 
-        if state.mark == 1:
-            return np.where(result == 2, 0.5, result)
-        else:
-            result = np.where(result == 2, 1, result)
-            return np.where(result == 1, 0.5, result)
+    def store_transition(self, state, action, reward, next_state, done):
+        idx = self.mem_cntr % self.mem_size
+        self.memory['s'][idx] = state
+        self.memory['a'][idx] = action
+        self.memory['r'][idx] = reward
+        self.memory['n_s'][idx] = next_state
+        self.memory['done'][idx] = done
+        self.mem_cntr += 1
 
-    def estimate(self, state):
-        # 価値の計算
+    def q_values(self, state: np.array):
         return self.model(
-            torch.from_numpy(state).view(-1, self.channel, self.col_num, self.row_num).float()
+            torch.from_numpy(state).view(-1, self.num_channel, self.num_column, self.num_row
+                                         ).float().to(self.model.device)
         )
 
-    def feature(self, state):
-        # 価値の計算
-        return self.teacher_model(
-            torch.from_numpy(state).view(-1, self.channel, self.col_num, self.row_num).float()
+    def target_q_values(self, state: np.array):
+        return self.target_model(
+            torch.from_numpy(state).view(-1, self.num_channel, self.num_column, self.num_row
+                                         ).float().to(self.target_model.device)
         )
 
-    def policy(self, state, epsilon):
-        # 状態からCNNの出力に基づき、次の行動を選択
+    def choose_action(self, state: np.array, epsilon: float):
         if np.random.random() < epsilon:
-            # 探索
             return int(np.random.choice(
-                [c for c in range(len(self.actions)) if state.board[c] == 0]
+                [c for c in range(self.num_action) if np.min(state, axis=1)[c] == 0]
             ))
         else:
-            # Actionの価値を取得
-            prediction = self.estimate(self.preprocess(state))[0].detach().numpy()
-            for i in range(len(self.actions)):
+            prediction = self.q_values(state)[0].detach().numpy()
+            for i in range(self.num_action):
                 # ゲーム上選択可能なactionに絞る
-                if state.board[i] != 0:
+                if np.min(state, axis=1)[i] != 0:
                     prediction[i] = -1e7
             return int(np.argmax(prediction))
 
-    def update(self, gamma):
-        # 行動履歴が十分に蓄積されている
-        if len(self.experience['s']) < self.min_experiences:
+    def update(self, gamma: float):
+        # メモリーがバッチサイズ以下であれば学習しない
+        if self.mem_cntr < self.batch_size:
             return
-        # 行動履歴から学習用のデータのidをサンプリングする
-        ids = np.random.randint(low=0, high=len(self.experience['s']), size=32)
-        states = np.asarray([self.preprocess(self.experience['s'][i]) for i in ids])
-        states_next = np.asarray([self.preprocess(self.experience['n_s'][i]) for i in ids])
-        # 価値の計算
-        estimateds = self.estimate(states).detach().numpy()
-        feature = self.feature(states_next).detach().numpy()
-        target = estimateds.copy()
-        for idx, i in enumerate(ids):
-            a = self.experience['a'][i]
-            r = self.experience['r'][i]
-            d = self.experience['done'][i]
+        # ReplayMemory, メモリーからランダムサンプリングを行う
+        max_mem = min(self.mem_cntr, self.mem_size)
+        batch_idx = np.random.choice(max_mem, self.batch_size, replace=False)
 
-            if d:
-                reward = r
-            else:
-                reward = r + gamma * np.max(feature[idx])
-        # TD誤差を小さくするようにCNNを更新
-        self.optimizer.zero_grad()
-        loss = self.criterrion(
-            torch.tensor(estimateds, requires_grad=True),
-            torch.tensor(target, requires_grad=True)
+        states = self.memory['s'][batch_idx]
+        actions = self.memory['a'][batch_idx]
+        rewards = self.memory['r'][batch_idx]
+        n_states = self.memory['n_s'][batch_idx]
+        done = self.memory['done'][batch_idx]
+
+        q_eval = np.max(self.q_values(states).detach().numpy(), axis=1)
+        q_target = np.max(self.target_q_values(n_states).detach().numpy(), axis=1)
+        q_target = np.where(done, rewards, rewards + gamma * q_target)
+
+        loss = self.criterion(
+            torch.tensor(q_eval, requires_grad=True).to(self.model.device),
+            torch.tensor(q_target, requires_grad=True).to(self.target_model.device)
         )
+
+        self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-    def update_teacher(self):
-        # 繊維先の価値の更新
-        self.teacher_model.load_state_dict(self.model.state_dict())
+    def update_target(self):
+        self.target_model.load_state_dict(self.model.state_dict())
 
 
-class DeepQNetworkTrainer():
-    def __init__(self, env, epsilon=0.9):
-        self.env = env
-        self.epsilon = epsilon
-        self.agent = DeepQNetworkAgent(env)
-        self.reward_log = []
-        self.epsilon_log = []
-        self.num_column = env.configuration['columns']
+class AgentTrainer():
+    def __init__(self, env, num_action):
+        self.agent = DDQNAgent(
+            env, num_action,
+            lr=1e-3, batch_size=64,
+            max_mem_size=10_000, num_channel=1
+        )
         self.num_row = env.configuration['rows']
+        self.num_column = env.configuration['columns']
 
-    def check_spot_pattern(self, state, pattern, check_mark, mode='v'):
-        if mode == 'v':
-            state = state
-        elif mode == 'h':
-            state = state.T
+        self.train_log = {'epsilon': [], 'reward': []}
 
-        pattern = np.array([check_mark if p else 0 for p in pattern])
-
-        n_window = len(pattern)
-        n_window_list = np.array([
-            row[i:i + n_window] for row in state for i in range(len(row) - n_window + 1)
+    def count_v_and_h_three_spot(self, state: np.array, next_state: np.array, mark: float):
+        prev_counter = 0
+        next_counter = 0
+        # count vertical patterns.
+        v_patterns = np.array([
+            [0, mark, mark, mark],
+            [mark, 0, mark, mark],
+            [mark, mark, 0, mark],
+            [mark, mark, mark, 0],
         ])
 
-        num_filled = np.all(n_window_list == pattern, axis=1).sum()
-        return num_filled
+        for v_pattern in v_patterns:
+            n_window = len(v_pattern)
+            # Prev State Count.
+            n_window_list = np.array([
+                row[i:i + n_window] for row in state for i in range(len(row) - n_window + 1)
+            ])
+            prev_counter += np.all(n_window_list == v_pattern, axis=1).sum()
+            # Next State Count.
+            n_window_list = np.array([
+                row[i:i + n_window] for row in next_state for i in range(len(row) - n_window + 1)
+            ])
+            next_counter += np.all(n_window_list == v_pattern, axis=1).sum()
 
-    def custom_reward(self, state, reward, done):
-        my_mark = state['mark']
-        enemy_mark = state['mark'] % 2 + 1
+        # count horizontal pattern.
+        h_patterns = np.array([0, mark, mark, mark])
+        n_window = len(h_patterns)
+        # Prev State Count.
+        n_window_list = np.array(
+            [row[i:i + n_window] for row in state.T for i in range(len(row) - n_window + 1)]
+        )
+        prev_counter += np.all(n_window_list == h_patterns, axis=1).sum()
+        # Next State Count.
+        n_window_list = np.array(
+            [row[i:i + n_window] for row in next_state.T for i in range(len(row) - n_window + 1)]
+        )
+        next_counter += np.all(n_window_list == h_patterns, axis=1).sum()
+        return (next_counter - prev_counter)
 
-        board = np.array(state['board']).reshape(self.num_column, self.num_row)
+    def count_block_opponent_win(self, state: np.array, next_state: np.array,
+                                 my_mark: float, opp_mark: float):
+        prev_counter = 0
+        next_counter = 0
+        # count vertical patterns.
+        v_patterns = np.array([
+            [my_mark, opp_mark, opp_mark, opp_mark],
+            [opp_mark, my_mark, opp_mark, opp_mark],
+            [opp_mark, opp_mark, my_mark, opp_mark],
+            [opp_mark, opp_mark, opp_mark, my_mark],
+        ])
 
+        for v_pattern in v_patterns:
+            n_window = len(v_pattern)
+            # Prev State Count.
+            n_window_list = np.array([
+                row[i:i + n_window] for row in state for i in range(len(row) - n_window + 1)
+            ])
+            prev_counter += np.all(n_window_list == v_pattern, axis=1).sum()
+            # Next State Count.
+            n_window_list = np.array([
+                row[i:i + n_window] for row in next_state for i in range(len(row) - n_window + 1)
+            ])
+            next_counter += np.all(n_window_list == v_pattern, axis=1).sum()
+
+        # count horizontal pattern.
+        h_patterns = np.array([my_mark, opp_mark, opp_mark, opp_mark])
+        n_window = len(h_patterns)
+        # Prev State Count.
+        n_window_list = np.array(
+            [row[i:i + n_window] for row in state.T for i in range(len(row) - n_window + 1)]
+        )
+        prev_counter += np.all(n_window_list == h_patterns, axis=1).sum()
+        # Next State Count.
+        n_window_list = np.array(
+            [row[i:i + n_window] for row in next_state.T for i in range(len(row) - n_window + 1)]
+        )
+        next_counter += np.all(n_window_list == h_patterns, axis=1).sum()
+        return (next_counter - prev_counter)
+
+    def custom_reward(self, state: np.array, next_state: np.array, reward: int, done: bool):
+        """
+        # 報酬設計
+        - 自駒が縦・横３つ揃う -> +100
+        - 他駒が縦・横３つ揃う -> -100
+        - 他駒が４つ揃いそうなとき防ぐ -> +100
+        - 他駒が斜めに３つ揃う
+        - 自駒が斜めに３つ揃う
+        """
+        my_mark = 1.0
+        opp_mark = 0.5
         # Clipping
         if done:
             if reward == 1:  # 勝ち
-                return 10000
+                score = 10
             elif reward == 0:  # 負け
-                return -10000
+                score = -10
             else:  # 引き分け
-                return 5000
+                score = 0
         else:
             score = -0.05
-            # Vertical
-            # Check Own Vertical win patterns
-            patterns = np.array([
-                [True, True, True, False],
-                [True, True, False, True],
-                [True, False, True, True],
-                [False, True, True, True],
-            ])
-            for pattern in patterns:
-                score += self.check_spot_pattern(board, pattern, my_mark, mode='v')
-            # Check Enemy Vertical win patterns
-            for pattern in patterns:
-                score -= 100 * self.check_spot_pattern(board, pattern, enemy_mark, mode='v')
-            # Horizontal
-            # Check Own Horizontal win patterns
-            pattern = np.array([False, True, True, True])
-            score += self.check_spot_pattern(board, pattern, my_mark, mode='h')
-            # Check Enemy Horizontal win patterns
-            score -= 100 * self.check_spot_pattern(board, pattern, enemy_mark, mode='h')
+            # Long-term match cost
+            # score -= 0.05 * np.sum(state != 0)
+            # Check three spot patterns
+            score += 1 * self.count_v_and_h_three_spot(state, next_state, my_mark)
+            score -= 3 * self.count_v_and_h_three_spot(state, next_state, opp_mark)
+            # Check Blocked the opponent's win
+            score += 5 * self.count_block_opponent_win(state, next_state, my_mark, opp_mark)
+        return score
 
-            return score
+    def train(self, env, max_epsilon=0.9, epsilon_decay_rate=0.9999, min_epsilon=1e-2,
+              num_episode=1000, gamma=0.9, verbose=50):
+        epsilon = max_epsilon
+        episode_cntr = 0
+        num_digit = len(str(num_episode))
 
-    def train(self, trainer, epsilon_decay_rate=0.9999,
-              min_epsilon=0.01, episode_cnt=100, gamma=0.6):
-        cnt = 0
-        for episode in tqdm(range(episode_cnt)):
-            rewards = []
-            state = trainer.reset()  # ゲーム環境リセット
-            self.epsilon = max(min_epsilon, self.epsilon * epsilon_decay_rate)
+        for i_eps in range(num_episode):
+            if (i_eps + 1) % verbose == 0 and i_eps != 0:
+                latest_avg_reward = np.mean(self.train_log['reward'][:-100])
+                print(f"{i_eps+1: >{num_digit}} / {num_episode:}:  ", end='')
+                print(f"reward  {latest_avg_reward:.4f}  ", end='')
+                print(f"epsilon {epsilon:.4f}.")
 
-            while not self.env.done:
-                # どの列にドロップするか決める
-                action = self.agent.policy(state, self.epsilon)
-                prev_state = state
-                state, reward, done, _ = trainer.step(action)
-                reward = self.custom_reward(state, reward, done)
-                # 行動履歴の蓄積
-                exp = {'s': prev_state, 'a': action, 'r': reward, 'n_s': state, 'done': done}
-                self.agent.add_experience(exp)
-                # 価値評価の更新
+            # match_type = [
+            #     [None, "negamax"], [None, "random"],
+            #     ["negamax", None], ["random", None]
+            # ]
+            # choosen_type = np.random.choice(len(match_type), p=[0.25, 0.25, 0.25, 0.25])
+            match_type = [
+                [None, "random"], ["random", None]
+            ]
+            choosen_type = np.random.choice(len(match_type), p=[0.5, 0.5])
+            trainer = env.train(match_type[choosen_type])
+
+            epsilon = max(min_epsilon, epsilon * epsilon_decay_rate)
+            state = trainer.reset()
+            state = preprocess(state)
+
+            while True:
+                action = self.agent.choose_action(state, epsilon)
+                next_state, reward, done, _ = trainer.step(action)
+                next_state = preprocess(next_state)
+                reward = self.custom_reward(state, next_state, reward, done)
+
+                self.agent.store_transition(state, action, reward, next_state, done)
                 self.agent.update(gamma)
-                cnt += 1
-                if cnt % 100 == 0:
-                    # 遷移先価値計算用の更新
-                    self.agent.update_teacher()
-            self.reward_log.append(reward)
-            self.epsilon_log.append(self.epsilon)
+
+                self.train_log['epsilon'].append(epsilon)
+                self.train_log['reward'].append(reward)
+
+                state = next_state
+
+                if episode_cntr % 100 == 0:
+                    self.agent.update_target()
+
+                if done:
+                    break
+
+
+def save_train_log(train_log, t_rool=5000):
+    df = pd.DataFrame(train_log)
+    # df.to_csv(f'train_log/{VERSION}_train_log.csv', index=False)
+    df = df.rolling(t_rool).mean()
+
+    fig, ax1 = plt.subplots()
+    plt.title(f'Reward and Epsilon Transition (rolling t{t_rool}.).')
+    plt.xlabel('Episode')
+    ax2 = ax1.twinx()
+
+    ax1.set_ylabel('Reward')
+    ax1.plot(df.index, df["reward"], color='tab:blue', label="Rewards")
+    ax2.set_ylabel('Epsilon')
+    ax2.plot(df.index, df["epsilon"], color='tab:green', label="Epsilon")
+
+    handler1, label1 = ax1.get_legend_handles_labels()
+    handler2, label2 = ax2.get_legend_handles_labels()
+
+    ax1.legend(handler1 + handler2, label1 + label2, loc=3)
+    plt.savefig(f'train_log/{VERSION}_reward_lr_history.png')
 
 
 def train_agent():
     env = kaggle_env.make("connectx", debug=False)
-    trainer = env.train([None, "negamax"])
-    print(json.dumps(env.configuration, indent=2))
+    num_action = env.configuration.columns
+    print(json.dumps(env.configuration, indent=2), '\n')
 
-    if os.path.exists(MODEL_FILEPATH):
-        dq_trainer = load_pickle(MODEL_FILEPATH)
+    if os.path.exists(MODEL_FILEPATH) and not IS_TEST:
+        dq_trainer = torch.load(MODEL_FILEPATH)
     else:
-        dq_trainer = DeepQNetworkTrainer(env)
-        dq_trainer.train(trainer, episode_cnt=30000)
-        # save cache.
-        dump_pickle(dq_trainer, MODEL_FILEPATH)
+        verbose = 10 if IS_TEST else 1000
+        train_esp_cnt = 100 if IS_TEST else 100_000
 
-    # dump reward log.
-    train_log = pd.DataFrame({
-        'Average Reward': dq_trainer.reward_log,
-        'Epsilon': dq_trainer.epsilon_log
-    })
-    train_log.to_csv(f'train_log/{VERSION}_train_log.csv', index=False)
-    plt.figure()
-    train_log['Average Reward'].rolling(300).mean().plot(
-        figsize=(10, 5),
-        title='Average Reward by rolling t300.'
-    )
-    plt.savefig(f'train_log/{VERSION}_reward_lr_history.png')
+        dq_trainer = AgentTrainer(env, num_action)
+        dq_trainer.train(
+            env, max_epsilon=0.9, epsilon_decay_rate=0.9999, min_epsilon=1e-2,
+            num_episode=train_esp_cnt, gamma=0.9, verbose=verbose
+        )
+        # save cache.
+        torch.save(dq_trainer, MODEL_FILEPATH)
+
+    save_train_log(dq_trainer.train_log)
+
+
+'''Create Submission File.
+- 必要なライブラリ、クラス、関数をsubmissionファイルに書き出す
+'''
 
 
 '''Create Submission File.
@@ -320,7 +411,7 @@ write_functions = [CNN, preprocess]
 
 agent_source = '''\
 def load_model():
-    model = CNN(7)
+    model = CNN(1, 7)
     encoded_weights = "{model_state_dict_bin}".encode()
     weights = pickle.loads(base64.b64decode(encoded_weights))
     model.load_state_dict(weights)
@@ -335,9 +426,9 @@ def agent(observation, config):
     row_num = config.rows
     channel = 1
 
-    state = preprocess(observation, col_num, row_num)
+    state = preprocess(observation)
     prediction = model(
-        torch.from_numpy(state).view(-1, channel, col_num, row_num).float()
+        torch.from_numpy(state).view(-1, channel, col_num, row_num).float().to(model.device)
     ).detach().numpy()
     action = int(np.argmax(prediction))
 
@@ -354,8 +445,8 @@ def write_agent_to_file(function, file):
         f.write(inspect.getsource(function) + '\n\n')
 
 
-def create_submission_file():
-    dq_trainer = load_pickle(MODEL_FILEPATH)
+def submission():
+    dq_trainer = torch.load(MODEL_FILEPATH)
     state_dict = dq_trainer.agent.model.state_dict()
     model_state_dict_bin = base64.b64encode(pickle.dumps(state_dict)).decode("utf-8")
 
@@ -379,22 +470,36 @@ def create_submission_file():
 '''
 
 
-def evaluation():
-    result = np.array(
-        kaggle_env.evaluate("connectx", [SUBMISSION_FILENAME, "random"], num_episodes=300)
-    )
-    win_rate = np.mean(result[:, 0] == 1)
-    print(f'Average Win Ratio: {win_rate}')
-
+def calc_beta(result):
     n_win = sum(result[:, 0] == 1)
     n_lose = sum(result[:, 0] == -1)
 
     x = np.linspace(0, 1, 1002)[1:-1]
     dist = scipy.stats.beta(n_win + 1, n_lose + 1)
 
+    return (x, dist.pdf(x))
+
+
+def evaluation():
+    num_esp = 10 if IS_TEST else 100
+
+    random_result = np.array(
+        kaggle_env.evaluate("connectx", [SUBMISSION_FILENAME, "random"], num_episodes=num_esp)
+    )
+    random_win_rate = np.mean(random_result[:, 0] == 1)
+    print(f'Average Win Ratio VS Random: {random_win_rate}')
+
+    negamax_result = np.array(
+        kaggle_env.evaluate("connectx", [SUBMISSION_FILENAME, "negamax"], num_episodes=num_esp)
+    )
+    negamax_win_rate = np.mean(negamax_result[:, 0] == 1)
+    print(f'Average Win Ratio VS Negamax: {negamax_win_rate}')
+
     plt.figure()
     plt.title('Beta Distribution of Win Rate.')
-    plt.plot(x, dist.pdf(x))
+    plt.plot(*calc_beta(random_result), color='tab:blue', label=f'random, {random_win_rate}')
+    plt.plot(*calc_beta(negamax_result), color='tab:orange', label=f'negamax, {negamax_win_rate}')
+    plt.legend()
     plt.savefig(f'evaluation/{VERSION}_beta_distribution_of_win_rate.png')
 
 
@@ -403,7 +508,7 @@ def main():
     train_agent()
 
     print('\n\n--- Create Submission File ---\n\n')
-    create_submission_file()
+    submission()
 
     print('\n\n--- Evaluation Agent. (vs Ramdon Agent) ---\n\n')
     evaluation()

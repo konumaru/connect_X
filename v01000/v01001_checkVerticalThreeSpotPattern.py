@@ -214,7 +214,7 @@ class DeepQNetworkTrainer():
             elif reward == 0:  # 負け
                 return -10000
             else:  # 引き分け
-                return 5000
+                return 0
         else:
             score = -0.05
             # Check Own win patterns

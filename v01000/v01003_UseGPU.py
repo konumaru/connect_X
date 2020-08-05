@@ -29,7 +29,9 @@ VERSION = str(__file__).split('_')[0]
 MODEL_FILEPATH = f'cache/{VERSION}_dq_trainer.pkl'
 SUBMISSION_FILENAME = f'../submission/{FILE_NAME}'
 
-print('cuda available: ', torch.cuda.is_available())
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+print(f'cuda available: {DEVICE}')
 
 
 '''Preprocessing.
@@ -68,15 +70,28 @@ class CNN(nn.Module):
         self.fc1 = nn.Linear(192, 32)
         self.fc2 = nn.Linear(32, num_action)
 
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.to(self.device)
-
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = x.view(x.size()[0], -1)
         x = self.fc1(x)
         x = self.fc2(x)
+        return x
+
+
+class NeurallNet():
+    def __init__(self, num_state: int, hidden_units: list, num_action: int):
+        super(NeurallNet).__init__()
+        hidden_units = [num_state] + hidden_units
+        self.hidden_layers = []
+        for i, u in enumerate(hidden_units[:-1]):
+            self.hidden_layers.append(nn.Linear(u, hidden_units[i + 1]))
+        self.output_layer = nn.Linear(hidden_units[-1], num_action)
+
+    def forward(self, x):
+        for layer in self.hidden_layers:
+            x = layer(x)
+        x = self.output_layer(x)
         return x
 
 
@@ -91,8 +106,8 @@ class DDQNAgent():
         self.num_row = self.env.configuration.rows
         self.num_column = self.env.configuration.columns
 
-        self.model = CNN(num_channel, num_action)
-        self.target_model = CNN(num_channel, num_action)
+        self.model = CNN(num_channel, num_action).to(DEVICE)
+        self.target_model = CNN(num_channel, num_action).to(DEVICE)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.criterion = torch.nn.MSELoss()
 
@@ -117,17 +132,19 @@ class DDQNAgent():
 
     def q_values(self, state: np.array):
         return self.model(
-            torch.from_numpy(state).view(-1, self.num_channel, self.num_column, self.num_row
-                                         ).float().to(self.model.device)
+            torch.from_numpy(state).view(
+                -1, self.num_channel, self.num_column, self.num_row
+            ).float().to(DEVICE)
         )
 
     def target_q_values(self, state: np.array):
         return self.target_model(
-            torch.from_numpy(state).view(-1, self.num_channel, self.num_column, self.num_row
-                                         ).float().to(self.target_model.device)
+            torch.from_numpy(state).view(
+                -1, self.num_channel, self.num_column, self.num_row
+            ).float().to(DEVICE)
         )
 
-    def choose_action(self, state: np.array, epsilon: float):
+    def act(self, state: np.array, epsilon: float):
         if np.random.random() < epsilon:
             return int(np.random.choice(
                 [c for c in range(self.num_action) if np.min(state, axis=1)[c] == 0]
@@ -154,13 +171,14 @@ class DDQNAgent():
         n_states = self.memory['n_s'][batch_idx]
         done = self.memory['done'][batch_idx]
 
-        q_eval = np.max(self.q_values(states).detach().numpy(), axis=1)
+        q_eval = self.q_values(states).detach().numpy()
+        q_eval = np.array([q[a] for q, a in zip(q_eval, actions.astype(int))])
         q_target = np.max(self.target_q_values(n_states).detach().numpy(), axis=1)
         q_target = np.where(done, rewards, rewards + gamma * q_target)
 
-        loss = self.criterion(
-            torch.tensor(q_eval, requires_grad=True).to(self.model.device),
-            torch.tensor(q_target, requires_grad=True).to(self.target_model.device)
+        loss = -1 * self.criterion(
+            torch.tensor(q_eval, requires_grad=True).to(DEVICE),
+            torch.tensor(q_target, requires_grad=True).to(DEVICE).to(DEVICE)
         )
 
         self.optimizer.zero_grad()
@@ -311,7 +329,7 @@ class AgentTrainer():
             # ]
             # choosen_type = np.random.choice(len(match_type), p=[0.25, 0.25, 0.25, 0.25])
             match_type = [
-                [None, "negamax"], ["negamax", None]
+                [None, "random"], ["random", None]
             ]
             choosen_type = np.random.choice(len(match_type), p=[0.5, 0.5])
             trainer = env.train(match_type[choosen_type])
@@ -321,7 +339,7 @@ class AgentTrainer():
             state = preprocess(state)
 
             while True:
-                action = self.agent.choose_action(state, epsilon)
+                action = self.agent.act(state, epsilon)
                 next_state, reward, done, _ = trainer.step(action)
                 next_state = preprocess(next_state)
                 reward = self.custom_reward(state, next_state, reward, done)
@@ -372,11 +390,11 @@ def train_agent():
         dq_trainer = torch.load(MODEL_FILEPATH)
     else:
         verbose = 10 if IS_TEST else 1000
-        train_esp_cnt = 100 if IS_TEST else 500_000
+        train_esp_cnt = 100 if IS_TEST else 100_000
 
         dq_trainer = AgentTrainer(env, num_action)
         dq_trainer.train(
-            env, max_epsilon=0.9, epsilon_decay_rate=0.99999, min_epsilon=1e-2,
+            env, max_epsilon=0.9, epsilon_decay_rate=0.9999, min_epsilon=1e-2,
             num_episode=train_esp_cnt, gamma=0.9, verbose=verbose
         )
         # save cache.
@@ -405,13 +423,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 '''
 
 write_functions = [CNN, preprocess]
 
 agent_source = '''\
 def load_model():
-    model = CNN(1, 7)
+    model = CNN(1, 7).to(DEVICE)
     encoded_weights = "{model_state_dict_bin}".encode()
     weights = pickle.loads(base64.b64decode(encoded_weights))
     model.load_state_dict(weights)
@@ -428,7 +448,7 @@ def agent(observation, config):
 
     state = preprocess(observation)
     prediction = model(
-        torch.from_numpy(state).view(-1, channel, col_num, row_num).float().to(model.device)
+        torch.from_numpy(state).view(-1, channel, col_num, row_num).float().to(DEVICE)
     ).detach().numpy()
     action = int(np.argmax(prediction))
 

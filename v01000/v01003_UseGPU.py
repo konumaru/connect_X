@@ -131,6 +131,7 @@ class DDQNAgent():
         self.mem_cntr += 1
 
     def q_values(self, state: np.array):
+        self.model.eval()
         return self.model(
             torch.from_numpy(state).view(
                 -1, self.num_channel, self.num_column, self.num_row
@@ -138,6 +139,7 @@ class DDQNAgent():
         )
 
     def target_q_values(self, state: np.array):
+        self.target_model.eval()
         return self.target_model(
             torch.from_numpy(state).view(
                 -1, self.num_channel, self.num_column, self.num_row
@@ -176,7 +178,8 @@ class DDQNAgent():
         q_target = np.max(self.target_q_values(n_states).detach().numpy(), axis=1)
         q_target = np.where(done, rewards, rewards + gamma * q_target)
 
-        loss = -1 * self.criterion(
+        self.model.train()
+        loss = self.criterion(
             torch.tensor(q_eval, requires_grad=True).to(DEVICE),
             torch.tensor(q_target, requires_grad=True).to(DEVICE).to(DEVICE)
         )

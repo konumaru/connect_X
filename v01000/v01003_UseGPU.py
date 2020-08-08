@@ -196,7 +196,7 @@ class AgentTrainer():
     def __init__(self, env, num_action):
         self.agent = DDQNAgent(
             env, num_action,
-            lr=1e-3, batch_size=512,
+            lr=1e-3, batch_size=1024,
             max_mem_size=10_000, num_channel=1
         )
         self.num_row = env.configuration['rows']
@@ -393,11 +393,11 @@ def train_agent():
         dq_trainer = torch.load(MODEL_FILEPATH)
     else:
         verbose = 10 if IS_TEST else 1000
-        train_esp_cnt = 100 if IS_TEST else 100_000
+        train_esp_cnt = 100 if IS_TEST else 1000_000
 
         dq_trainer = AgentTrainer(env, num_action)
         dq_trainer.train(
-            env, max_epsilon=0.9, epsilon_decay_rate=0.9999, min_epsilon=1e-2,
+            env, max_epsilon=0.99, epsilon_decay_rate=0.9999, min_epsilon=1e-1,
             num_episode=train_esp_cnt, gamma=0.9, verbose=verbose
         )
         # save cache.
